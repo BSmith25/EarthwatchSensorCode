@@ -1,2 +1,2 @@
 # EarthwatchSensorCode
-Code for the Green Infrastructure Sensors in the Earthwatc Project
+Code for the Green Infrastructure Sensors in the Earthwatch Project
