@@ -1,0 +1,197 @@
+//Template code for SoilCell 3G from http://greenstemnetwork.org/diy/soil-cell-3g/. Includes one soil sensor and one thermistor, transmitting to Ubidots at 2-hr interval.
+//Compile on Particle platform only. Philadelphia Water Department.
+
+// This #include statement was automatically added by the Particle IDE.
+#include <thermistor-library.h>
+
+// This #include statement was automatically added by the Particle IDE.
+#include <HttpClient.h>
+
+SYSTEM_MODE(MANUAL);                                                            //Forces electron into manual mode, causing connections to only be made when and if needed
+#define VARIABLE_ID1 "SOIL SENSOR VARIABLE HERE"                                //Soil Sensor
+#define VARIABLE_ID2 "BATTERY VARIABLE HERE"                                    //Battery
+#define VARIABLE_ID3 "NETWORK VARIABLE HERE"                                    //Network Strength
+#define VARIABLE_ID4 "TEMPERATURE VARIABLE HERE"                                //Temperature
+#define TOKEN "UBIDOTS TOKEN HERE"                                              //Ubidots Token
+
+HttpClient http;                                                                //Creates the  HTTP Client object for use in communications
+FuelGauge fuel;                                                                 //Creates FuelGauge object for use in battery metrics
+int networkStrength, bat, soil;                                                 //Initializes variables for holding values to be sent to Ubidots
+int soilReadings[5];
+int thermPin = A5;                                                              //10k thermistor on pin A5
+int thermRes = 10000;
+float average;
+float temperature;
+ 
+Thermistor Thermistor(thermPin, thermRes);                                      //Creates thermistor object
+
+http_header_t headers[] = {                                                     //Headers currently need to be set at init, useful for API keys etc.
+    { "Content-Type", "application/json" },                                     //Sets content type for values to be sent to Ubidots as JSON
+    { NULL, NULL }                                                              //NOTE: Always terminate headers with NULL
+};
+
+http_request_t request;                                                         //Initializes request object to form HTTP request
+http_response_t response;                                                       //Initializes response object for reporting any responses
+
+void cellConnect(){                                                             //Turns on cellular functions and waits until connection established
+    Serial.print("Connecting to Cellular...");
+    if (!Cellular.ready()){                                                     //Enables cellular communication
+        Cellular.on();
+        Cellular.connect();
+    }
+    while(!Cellular.ready());                                                   //Waits until connection is succesfully enabled
+    Serial.println("Connected.");
+}
+
+void cellDisconnect(){                                                          //Turns off cellular functions to save power during sleeping
+    Serial.print("Disconnecting from Cellular...");
+    Cellular.disconnect();                                                      //Disconnects cellular communications
+    Cellular.off();                                                             //Turns off cellular module to save power
+    while(Cellular.ready());                                                    //Waits until connection is disabled
+    Serial.println("Disconnected.");
+}
+
+void flashing(){                                                                //Function for testing to allow time to place device in listening mode
+    Serial.println("Pausing for 5 seconds to allow for reflashing");
+    digitalWrite(D7,HIGH);                                                      //Turns on on-board LED to indicate waiting
+    delay(5000);
+    digitalWrite(D7,LOW);                                                       //Turns off on-board LED to continue program
+}
+
+//Begin functions to return median value of 5 soil sensor readings
+
+void swap(int &a, int &b){                                                      //Swaps values of two variables
+    int temp = a;                                                               //Assigns value of a to temp
+    a = b;                                                                      //Assigns value of b to a
+    b = temp;                                                                   //Assigns value of temp to b 
+}
+
+int findLow(int sorting[], int low, int high){                                  //Finds lowest value in a passed array between two determined indexes
+    
+    int smallest = sorting[low];                                                //Assigns a primary "lowest" value
+    int smallIndex = low;                                                       //Assigns a value to keep track of the index of the lowest number
+    for(int i = low; i < high; i++){                                            //Cycles through the array between the given boundaries to find the smallest number and its index
+        if(sorting[i] < smallest){                                              //Checks whether the current number is smaller than the current record
+            smallest = sorting[i];                                              //If it is, set that as the record and continue
+            smallIndex = i;                                                     //Also updates the index value 
+        }
+    }
+    return smallIndex;                                                          //Returns the index of the smallest value between the given boundaries
+}
+
+void selectSort(int sorting[], int high){                                       //Sorting function
+    int smallIndex;                                                             //Value for holding index of smallest value in given bounds of array
+    for(int low = 0; low < high; low++){                                        //Cycles through the given array, calling findLow and swap
+        smallIndex = findLow(sorting, low, high);                               //Calculates the index of the lowest value in the array between the given bounds
+        if (smallIndex != low){                                                 //If the lowest value is not at the current index swaps the two values
+            swap(sorting[low], sorting[smallIndex]);                            //Calls swap with the two values to be swapped
+        }
+    }
+}
+
+int soilRead(){                                                                 //Takes a voltage reading from the soil and returns an adjusted value
+    delay(400);                                                                 //Delay for stablizing and giving general value reading 
+    return (analogRead(A0));                                                    //Takes reading and returns raw data value
+}
+
+void getSoilRead(int powerPin){                                                 //Populates soil readings array with values
+    digitalWrite(powerPin, HIGH);                                               //Turns on power to the soil sensor
+    for(int i = 0; i < 5; i++){                                                 //Takes 5 soil readings and finds the median of the array
+        soilReadings[i] = soilRead();                                           //Loads a soil reading into each index of the array
+    }
+    digitalWrite(powerPin, LOW);                                                //Turns off power to soil sensor to save power
+}
+
+void getValues(){                                                               //Collects the values to be sent to Ubidots
+    
+    getSoilRead(D0);                                                            //Populates soil readings array with values
+    selectSort(soilReadings,5);                                                 //Sorts the array of values
+    soil = soilReadings[2];                                                     //Selects the median value as the one to be sent
+
+    bat = fuel.getSoC();                                                        //Gets the current battery percentage
+    
+    cellConnect();                                                              //Establishes cellular communications
+    CellularSignal sig = Cellular.RSSI();                                       //Creates cellular object for messuring Network Strength
+    networkStrength = sig.rssi;                                                 //Gets network strength
+    if (networkStrength < 0){
+        networkStrength *= -1;                                                  //Ensures that network strength is a positive number as per Ubidots requirements
+    }
+    
+    digitalWrite(D6, HIGH);                                                     //Thermistor powered by pin D6
+    delay(500);
+    temperature = Thermistor.getTempF();
+    digitalWrite(D6, LOW);
+
+    sendData(1,soil);                                                           //Sends soil data to Ubidots
+    sendData(2,bat);                                                            //Sends battery value to Ubidots
+    sendData(3,networkStrength);                                                //Sends network strength to Ubidots
+    sendData(4,temperature);                                                    //Sends temperature data to Ubidots    
+    cellDisconnect();                                                           //Disables cellular communications 
+}
+
+bool sendData(int ID, int value){                                               //Sends data to Ubidots
+    
+    request.hostname = "things.ubidots.com";                                    //Site hostname
+    request.port = 80;                                                          //Port to connect, 80 is standard for HTTP
+    
+    if (ID == 1){                                                               //Send values based on variable IDs
+        request.path = "/api/v1.6/variables/"VARIABLE_ID1"/values?token="TOKEN; 
+    }
+    else if(ID == 2){
+        request.path = "/api/v1.6/variables/"VARIABLE_ID2"/values?token="TOKEN;
+    }
+    else if(ID == 3){
+        request.path = "/api/v1.6/variables/"VARIABLE_ID3"/values?token="TOKEN;
+    }
+    else if(ID == 4){
+        request.path = "/api/v1.6/variables/"VARIABLE_ID4"/values?token="TOKEN;
+    }
+    else{                                                                       //If none of the IDs are matching prints a warning and exits the function
+        Serial.println("You've passed a bad ID value to the sendData function...");\
+        return false;
+    }
+    
+    if(value < 0){                                                              //Catch all for negative data being sent to Ubidots, prints a warning and corrects then sends value
+        Serial.println("You've tried to send a negative value to Ubidots, correcting...");
+        value *= -1;
+    }
+    
+    Serial.print("Sending data...");
+
+    request.body = "{\"value\":" + String(value) + "}";//Forming the rest of the HTTP request
+    
+    http.post(request, response, headers);                                      //Preforms the HTTP request using the post method
+    
+    Serial.println("Sent");                                                     
+    
+    Serial.println(response.status);                                            //Displays HTTP status codes
+    Serial.println(response.body);                                              //Displays any returned values by the HTTP body
+    return true;                                                                //Returns true and exits the function
+}
+
+void printValues(){                                                             //Prints values to the serial monitor if needed - uncomment in loop below
+    Serial.print("Soil Reading:");
+    Serial.println(soil);
+    Serial.print("Battery percentage:");
+    Serial.println(bat);
+    Serial.println("%");
+    Serial.print("Network Strength:");
+    Serial.print(networkStrength);
+    Serial.println("dBm");
+    Serial.print("Fahrenheit: ");
+	Serial.println(temperature);
+}
+
+void setup() {                                                                  
+    pinMode(D0, OUTPUT);                                                        //Sets pin mode for power pin for soil sensor
+    Serial.begin(9600);                                                         //Sets up serial communication
+    pinMode(D6, OUTPUT);                                                        //Thermistor power pin
+    Thermistor.begin();
+}
+
+void loop() {
+    getValues();                                                                //Gathers values and sends them
+    //printValues();
+    //delay(10000);
+    System.sleep(SLEEP_MODE_DEEP,(3600*2)-54);                                  //Puts all other modules to sleep for 2 hours
+}
